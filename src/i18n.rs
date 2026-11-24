@@ -29,6 +29,7 @@ pub enum S {
     MenuHeader,
     MenuOff,
     MenuAutostart,
+    DimmingFailed,
     MenuAbout,
     MenuExit,
     AboutDescription,
@@ -43,6 +44,12 @@ pub fn tr(lang: Lang, s: S) -> &'static str {
         (Lang::En, S::MenuOff) => "0%  (off)",
         (Lang::Ru, S::MenuAutostart) => "Запускать вместе с Windows",
         (Lang::En, S::MenuAutostart) => "Start with Windows",
+        (Lang::Ru, S::DimmingFailed) => {
+            "Не удалось включить затемнение (Magnification API). Уровень сброшен до 0%. Подробности в log.txt."
+        }
+        (Lang::En, S::DimmingFailed) => {
+            "Could not apply the dimming (Magnification API). Level reset to 0%. See log.txt."
+        }
         (Lang::Ru, S::MenuAbout) => "О программе",
         (Lang::En, S::MenuAbout) => "About",
         (Lang::Ru, S::MenuExit) => "Выход",
