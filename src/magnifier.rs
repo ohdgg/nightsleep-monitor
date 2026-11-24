@@ -1,6 +1,7 @@
-//! Experimental dimming through the Magnification API: a color matrix is
-//! applied to the whole desktop at composition time, so no window has to win
-//! a z-order fight with the Start menu or the taskbar.
+//! Dimming through the Magnification API: a color matrix is applied to the
+//! whole desktop at composition time, so it also covers the Start menu, the
+//! taskbar, thumbnails, tooltips and Aero Peek (no window has to win a
+//! z-order fight). This is the only dimming method of the app.
 //!
 //! Safety net: the effect is always reset to identity (and the API
 //! uninitialised) when dimming goes back to 0%, on exit, on panic, and by the

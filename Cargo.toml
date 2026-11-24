@@ -3,7 +3,7 @@ name = "nightsleep"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-description = "Tiny Windows tray utility for deep screen dimming (overlay-based)"
+description = "Tiny Windows tray utility for deep screen dimming"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ohdgg/nightsleep-monitor"
 readme = "README.md"
@@ -14,14 +14,12 @@ version = "0.61"
 features = [
     "Win32_Foundation",
     "Win32_Globalization",
-    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
-    "Win32_UI_Accessibility",
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Magnification",

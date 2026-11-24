@@ -9,7 +9,6 @@
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM,
@@ -20,33 +19,29 @@ use windows_sys::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows_sys::Win32::System::Threading::CreateMutexW;
-use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW, GetMessageW,
-    GetWindowLongPtrW, GetWindowLongW, KillTimer, MessageBoxW, PostMessageW, PostQuitMessage,
-    RegisterClassExW, RegisterWindowMessageW, SetTimer, SetWindowLongPtrW, TranslateMessage,
-    CREATESTRUCTW, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, GWLP_USERDATA, GWL_EXSTYLE,
-    GWL_STYLE, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MSG, OBJID_WINDOW,
-    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONUP, WM_NCCREATE, WM_POWERBROADCAST,
-    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_POPUP,
+    GetWindowLongPtrW, KillTimer, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    RegisterWindowMessageW, SetTimer, SetWindowLongPtrW, TranslateMessage, CREATESTRUCTW,
+    GWLP_USERDATA, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MSG, WM_APP, WM_CLOSE,
+    WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONUP,
+    WM_NCCREATE, WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    WNDCLASSEXW, WS_POPUP,
 };
 
 use crate::autostart;
-use crate::config::{self, Config, Method};
+use crate::config::{self, Config};
 use crate::hotkey::{self, Hotkey};
 use crate::i18n::{self, tr, Lang, S};
 use crate::log;
 use crate::magnifier::{self, Magnifier};
-use crate::overlay::{should_reassert, Overlay};
 use crate::tray::{self, MenuSnapshot, Tray};
 use crate::win::{loword, wide};
 
 pub const WM_APP_TRAY: u32 = WM_APP + 1;
-pub const WM_APP_REASSERT: u32 = WM_APP + 2;
 pub const WM_APP_SHOW_SETTINGS: u32 = WM_APP + 3;
 
 const MSG_CLASS: &str = "NightSleepMsgWnd";
@@ -58,9 +53,9 @@ const HK_TOGGLE: i32 = 3;
 const HK_EMERGENCY: i32 = 4;
 
 const TIMER_SAVE: usize = 1;
-const TIMER_MONITORS: usize = 2;
+const TIMER_REFRESH: usize = 2;
 const SAVE_DELAY_MS: u32 = 1000;
-const MONITOR_DEBOUNCE_MS: u32 = 300;
+const REFRESH_DEBOUNCE_MS: u32 = 300;
 
 // Values of constants that live in headers outside the enabled feature set.
 const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
@@ -70,24 +65,13 @@ const WTS_SESSION_UNLOCK: usize = 8;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const APP_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
-/// Window handle for the WinEvent callback, which has no user-data parameter.
-static HOOK_TARGET: AtomicIsize = AtomicIsize::new(0);
-/// True while a reassert message is queued: bursts of events collapse into one.
-static REASSERT_PENDING: AtomicBool = AtomicBool::new(false);
-
 struct App {
     hwnd: HWND,
     cfg: Config,
     first_run: bool,
-    overlay: Option<Overlay>,
-    /// Created on first use of the experimental `magnifier` method.
-    magnifier: Option<Magnifier>,
+    /// The only dimming method: a color matrix of the Magnification API.
+    magnifier: Magnifier,
     tray: Option<Tray>,
-    /// Foreground-change hook, installed for the whole run.
-    hook: HWINEVENTHOOK,
-    /// Window-shown hook, installed only while dimming is active so that the
-    /// idle app (0%) receives no system-wide events at all.
-    hook_show: HWINEVENTHOOK,
     taskbar_created_msg: u32,
     session_registered: bool,
     shut_down: bool,
@@ -146,14 +130,6 @@ pub fn run() -> i32 {
     if args.iter().any(|a| a == "--reset") || !cfg.restore_on_startup {
         cfg.level.set(0);
     }
-    for arg in &args {
-        if let Some(value) = arg.strip_prefix("--method=") {
-            match Method::parse(value) {
-                Some(method) => cfg.method = method,
-                None => log::warn(&format!("unknown --method value: {value}")),
-            }
-        }
-    }
     if args.iter().any(|a| a == "--autostart") {
         log::info("started from autostart");
     }
@@ -165,11 +141,8 @@ pub fn run() -> i32 {
         hwnd: null_mut(),
         cfg,
         first_run: loaded.first_run,
-        overlay: None,
-        magnifier: None,
+        magnifier: Magnifier::new(),
         tray: None,
-        hook: null_mut(),
-        hook_show: null_mut(),
         taskbar_created_msg: 0,
         session_registered: false,
         shut_down: false,
@@ -256,17 +229,11 @@ impl App {
 
     fn init(&mut self, hwnd: HWND, hinstance: windows_sys::Win32::Foundation::HINSTANCE) {
         self.hwnd = hwnd;
-        HOOK_TARGET.store(hwnd as isize, Ordering::Relaxed);
         log::info(&format!("start v{APP_VERSION}"));
 
         let taskbar_name = wide("TaskbarCreated");
         // SAFETY: valid NUL-terminated name.
         self.taskbar_created_msg = unsafe { RegisterWindowMessageW(taskbar_name.as_ptr()) };
-
-        match Overlay::new(hinstance) {
-            Ok(overlay) => self.overlay = Some(overlay),
-            Err(code) => log::error(&format!("overlay unavailable (error {code})")),
-        }
 
         let tray = Tray::new(hwnd, hinstance);
         if !tray.add(self.cfg.level.current(), WM_APP_TRAY) {
@@ -276,22 +243,11 @@ impl App {
 
         let failed = self.register_hotkeys();
 
-        // SAFETY: the callback only posts a message to our own window.
-        unsafe {
-            self.hook = SetWinEventHook(
-                EVENT_SYSTEM_FOREGROUND,
-                EVENT_SYSTEM_FOREGROUND,
-                null_mut(),
-                Some(win_event_proc),
-                0,
-                0,
-                WINEVENT_OUTOFCONTEXT,
-            );
-            self.session_registered =
-                WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) != 0;
-        }
+        // SAFETY: plain FFI call on our own window.
+        self.session_registered =
+            unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) } != 0;
 
-        if self.cfg.method == Method::Magnifier && self.cfg.level.current() == 0 {
+        if self.cfg.level.current() == 0 {
             // A previous run may have died with the color effect still applied.
             magnifier::force_reset();
         }
@@ -369,6 +325,8 @@ impl App {
     fn apply_level(&mut self) {
         let level = self.cfg.level.current();
         self.apply_dimming(level);
+        // The level may have been reset to 0 if dimming failed.
+        let level = self.cfg.level.current();
         if let Some(tray) = &self.tray {
             tray.update(level);
         }
@@ -378,90 +336,19 @@ impl App {
         }
     }
 
-    /// Dims with the configured method. If the experimental `magnifier`
-    /// method fails, the app switches back to the overlay, remembers that
-    /// choice (it is saved) and tells the user.
-    fn apply_dimming(&mut self, level: u8) {
-        if self.cfg.method == Method::Magnifier {
-            let result = self
-                .magnifier
-                .get_or_insert_with(Magnifier::new)
-                .apply(level);
-            match result {
-                Ok(()) => {
-                    // The overlay is not used in this mode.
-                    if let Some(overlay) = &mut self.overlay {
-                        overlay.apply(0);
-                    }
-                    self.set_show_hook(false);
-                    return;
-                }
-                Err(e) => {
-                    log::error(&format!("magnifier: {e}; falling back to the overlay"));
-                    self.cfg.method = Method::Overlay;
-                    self.magnifier = None; // Drop restores the screen
-                    let lang = self.lang();
-                    self.notify(tr(lang, S::MagnifierFailed), true);
-                }
-            }
-        }
-        // Overlay method (also the fallback path above).
-        if let Some(magnifier) = &mut self.magnifier {
-            magnifier.reset();
-        }
-        if let Some(overlay) = &mut self.overlay {
-            overlay.apply(level);
-        }
-        self.set_show_hook(level > 0);
-    }
-
-    /// Switches the dimming method at runtime. The old method is released
-    /// completely before the new one takes over.
-    fn switch_method(&mut self, new: Method) {
-        if self.cfg.method == new {
-            return;
-        }
-        log::info(&format!(
-            "dimming method: {} -> {}",
-            self.cfg.method.as_str(),
-            new.as_str()
-        ));
-        if let Some(magnifier) = &mut self.magnifier {
-            magnifier.reset();
-        }
-        if let Some(overlay) = &mut self.overlay {
-            overlay.apply(0);
-        }
-        self.set_show_hook(false);
-        self.cfg.method = new;
-        self.apply_level();
-    }
-
-    /// Installs or removes the hook that notices new topmost windows
-    /// (taskbar thumbnails, tooltips, flyouts) so the overlay can go back on top.
-    fn set_show_hook(&mut self, on: bool) {
-        // SAFETY: the callback only filters and posts a message to our window;
-        // the handle is owned by `self` and released exactly once.
-        unsafe {
-            if on && self.hook_show.is_null() {
-                self.hook_show = SetWinEventHook(
-                    EVENT_OBJECT_SHOW,
-                    EVENT_OBJECT_SHOW,
-                    null_mut(),
-                    Some(show_event_proc),
-                    0,
-                    0,
-                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-                );
-                if self.hook_show.is_null() {
-                    log::warn(&format!(
-                        "SetWinEventHook(EVENT_OBJECT_SHOW) failed ({})",
-                        GetLastError()
-                    ));
-                }
-            } else if !on && !self.hook_show.is_null() {
-                UnhookWinEvent(self.hook_show);
-                self.hook_show = null_mut();
+    /// Applies the color matrix. There is no fallback method: if the
+    /// Magnification API refuses, the level goes back to 0% so that the tray
+    /// and the saved settings never claim a dimming that is not on screen.
+    /// Returns whether dimming succeeded.
+    fn apply_dimming(&mut self, level: u8) -> bool {
+        match self.magnifier.apply(level) {
+            Ok(()) => true,
+            Err(e) => {
+                log::error(&format!("magnifier: {e}"));
+                self.cfg.level.set(0);
+                let lang = self.lang();
+                self.notify(tr(lang, S::DimmingFailed), true);
+                false
             }
         }
     }
@@ -472,25 +359,11 @@ impl App {
         }
     }
 
-    /// Foreground change or a new topmost window: only the overlay can be
-    /// covered by other windows, the color matrix cannot.
-    fn reassert(&self) {
-        if self.cfg.method == Method::Overlay {
-            if let Some(overlay) = &self.overlay {
-                overlay.reassert();
-            }
-        }
-    }
-
-    /// Resume, unlock, settings or display change: bring the dimming back
-    /// (raise the overlay / re-apply the color matrix).
+    /// Resume, unlock, settings or display change: apply the matrix again.
     fn refresh(&mut self) {
-        match self.cfg.method {
-            Method::Overlay => self.reassert(),
-            Method::Magnifier => {
-                let level = self.cfg.level.current();
-                self.apply_dimming(level);
-            }
+        let level = self.cfg.level.current();
+        if !self.apply_dimming(level) {
+            self.apply_level(); // update tray and schedule a save
         }
     }
 
@@ -512,14 +385,7 @@ impl App {
         }
         match id {
             TIMER_SAVE => self.save_now(),
-            TIMER_MONITORS => match self.cfg.method {
-                Method::Overlay => {
-                    if let Some(overlay) = &mut self.overlay {
-                        overlay.sync();
-                    }
-                }
-                Method::Magnifier => self.refresh(),
-            },
+            TIMER_REFRESH => self.refresh(),
             _ => {}
         }
     }
@@ -530,7 +396,6 @@ impl App {
             current: self.cfg.level.current(),
             presets: self.cfg.level.presets().collect(),
             autostart: autostart::is_enabled(),
-            method: self.cfg.method,
         }
     }
 
@@ -538,10 +403,6 @@ impl App {
         if (tray::ID_LEVEL_BASE..=tray::ID_LEVEL_BASE + 100).contains(&cmd) {
             self.cfg.level.set((cmd - tray::ID_LEVEL_BASE) as u8);
             self.apply_level();
-        } else if cmd == tray::ID_METHOD_OVERLAY {
-            self.switch_method(Method::Overlay);
-        } else if cmd == tray::ID_METHOD_MAGNIFIER {
-            self.switch_method(Method::Magnifier);
         } else if cmd == tray::ID_AUTOSTART && !autostart::toggle() {
             log::warn("changing autostart failed");
         }
@@ -553,36 +414,22 @@ impl App {
             return;
         }
         self.shut_down = true;
-        // Save first, with the real level: the overlay disappears with the
-        // process, so there is no need to reset to 0% (which would be saved).
+        // Save first, with the real level: the screen is restored below without
+        // touching the level, so the next start can bring the dimming back.
         self.save_now();
         if let Some(tray) = &self.tray {
             tray.remove();
         }
         self.unregister_hotkeys();
-        // SAFETY: handles were obtained in `init` and are released once.
-        unsafe {
-            if !self.hook.is_null() {
-                UnhookWinEvent(self.hook);
-                self.hook = null_mut();
-            }
-            if !self.hook_show.is_null() {
-                UnhookWinEvent(self.hook_show);
-                self.hook_show = null_mut();
-            }
-            if self.session_registered {
+        if self.session_registered {
+            // SAFETY: registered in `init`; released once.
+            unsafe {
                 WTSUnRegisterSessionNotification(self.hwnd);
-                self.session_registered = false;
             }
+            self.session_registered = false;
         }
-        HOOK_TARGET.store(0, Ordering::Relaxed);
-        if let Some(overlay) = &mut self.overlay {
-            overlay.destroy();
-        }
-        // Restore the screen last-but-certainly: identity matrix, API released.
-        if let Some(magnifier) = &mut self.magnifier {
-            magnifier.reset();
-        }
+        // Restore the screen last: identity matrix, API released.
+        self.magnifier.reset();
     }
 }
 
@@ -621,59 +468,6 @@ fn on_tray_context_menu(hwnd: HWND, app: *mut App) {
     }
 }
 
-unsafe extern "system" fn win_event_proc(
-    _hook: HWINEVENTHOOK,
-    _event: u32,
-    _hwnd: HWND,
-    _id_object: i32,
-    _id_child: i32,
-    _thread: u32,
-    _time: u32,
-) {
-    request_reassert();
-}
-
-/// A window was shown somewhere in the system (another process: our own
-/// events are skipped by `WINEVENT_SKIPOWNPROCESS`). Only top-level topmost
-/// windows can cover the overlay, so everything else is ignored cheaply.
-unsafe extern "system" fn show_event_proc(
-    _hook: HWINEVENTHOOK,
-    _event: u32,
-    hwnd: HWND,
-    id_object: i32,
-    id_child: i32,
-    _thread: u32,
-    _time: u32,
-) {
-    if hwnd.is_null() || id_object != OBJID_WINDOW || id_child != 0 {
-        return;
-    }
-    // SAFETY: plain queries on a window handle; a stale handle just fails.
-    let (style, ex_style) = unsafe {
-        (
-            GetWindowLongW(hwnd, GWL_STYLE) as u32,
-            GetWindowLongW(hwnd, GWL_EXSTYLE) as u32,
-        )
-    };
-    if should_reassert(style, ex_style) {
-        request_reassert();
-    }
-}
-
-/// Asks the message loop to raise the overlay. At most one request is queued
-/// at a time, so a burst of events costs a single `SetWindowPos` pass.
-fn request_reassert() {
-    let target = HOOK_TARGET.load(Ordering::Relaxed);
-    if target == 0 || REASSERT_PENDING.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    // SAFETY: posting to our own window.
-    let posted = unsafe { PostMessageW(target as HWND, WM_APP_REASSERT, 0, 0) };
-    if posted == 0 {
-        REASSERT_PENDING.store(false, Ordering::Release);
-    }
-}
-
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // SAFETY: every block below dereferences the `App` pointer stored by
     // WM_NCCREATE. It is valid from then until after the message loop ends,
@@ -705,17 +499,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 0
             }
-            WM_APP_REASSERT | WM_SETTINGCHANGE => {
-                if msg == WM_APP_REASSERT {
-                    // Clear first: events arriving during the pass queue a new one.
-                    REASSERT_PENDING.store(false, Ordering::Release);
-                }
-                if msg == WM_SETTINGCHANGE {
-                    (*app).refresh();
-                    return DefWindowProcW(hwnd, msg, wparam, lparam);
-                }
-                (*app).reassert();
-                0
+            WM_SETTINGCHANGE => {
+                (*app).refresh();
+                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_APP_SHOW_SETTINGS => {
                 // The settings dialog is not implemented yet (stage 3).
@@ -724,8 +510,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 0
             }
             WM_DISPLAYCHANGE => {
-                // Arrives in bursts: debounce, then resync the overlay windows.
-                SetTimer(hwnd, TIMER_MONITORS, MONITOR_DEBOUNCE_MS, None);
+                // Arrives in bursts: debounce, then apply the matrix again.
+                SetTimer(hwnd, TIMER_REFRESH, REFRESH_DEBOUNCE_MS, None);
                 0
             }
             WM_TIMER => {
