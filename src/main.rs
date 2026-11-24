@@ -15,6 +15,8 @@ mod app;
 #[cfg(any(windows, nightsleep_typecheck))]
 mod autostart;
 #[cfg(any(windows, nightsleep_typecheck))]
+mod magnifier;
+#[cfg(any(windows, nightsleep_typecheck))]
 mod overlay;
 #[cfg(any(windows, nightsleep_typecheck))]
 mod tray;

@@ -15,6 +15,20 @@ pub fn alpha(level: u8) -> u8 {
     ((u32::from(level.min(100)) * 255 + 50) / 100) as u8
 }
 
+/// 5x5 color matrix for the Magnification API (row-major, as `MAGCOLOREFFECT`).
+/// Scales R, G and B so the result equals a black overlay of the same level:
+/// `out = in * (1 - alpha/255)`. Level 0 gives the identity matrix.
+pub fn color_matrix(level: u8) -> [f32; 25] {
+    let factor = 1.0 - f32::from(alpha(level)) / 255.0;
+    let mut m = [0.0f32; 25];
+    m[0] = factor; // R
+    m[6] = factor; // G
+    m[12] = factor; // B
+    m[18] = 1.0; // alpha
+    m[24] = 1.0; // translation row
+    m
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Level {
     current: u8,
@@ -129,6 +143,41 @@ mod tests {
         assert_eq!(alpha(90), 230);
         assert_eq!(alpha(100), 255);
         assert_eq!(alpha(200), 255);
+    }
+
+    #[test]
+    fn color_matrix_level_zero_is_identity() {
+        let m = color_matrix(0);
+        for row in 0..5 {
+            for col in 0..5 {
+                let expected = if row == col { 1.0 } else { 0.0 };
+                assert_eq!(m[row * 5 + col], expected, "cell {row},{col}");
+            }
+        }
+    }
+
+    #[test]
+    fn color_matrix_matches_overlay_alpha() {
+        for level in [10u8, 30, 50, 90, 100] {
+            let m = color_matrix(level);
+            let expected = 1.0 - f32::from(alpha(level)) / 255.0;
+            assert!((m[0] - expected).abs() < 1e-6);
+            assert_eq!(m[0], m[6]);
+            assert_eq!(m[6], m[12]);
+            assert_eq!(m[18], 1.0);
+            assert_eq!(m[24], 1.0);
+        }
+        assert_eq!(color_matrix(100)[0], 0.0);
+    }
+
+    #[test]
+    fn color_matrix_is_monotonic() {
+        let mut prev = 1.0f32;
+        for l in 0..=100u8 {
+            let f = color_matrix(l)[0];
+            assert!(f <= prev);
+            prev = f;
+        }
     }
 
     #[test]

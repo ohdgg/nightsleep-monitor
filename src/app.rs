@@ -36,10 +36,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::autostart;
-use crate::config::{self, Config};
+use crate::config::{self, Config, Method};
 use crate::hotkey::{self, Hotkey};
 use crate::i18n::{self, tr, Lang, S};
 use crate::log;
+use crate::magnifier::{self, Magnifier};
 use crate::overlay::{should_reassert, Overlay};
 use crate::tray::{self, MenuSnapshot, Tray};
 use crate::win::{loword, wide};
@@ -79,6 +80,8 @@ struct App {
     cfg: Config,
     first_run: bool,
     overlay: Option<Overlay>,
+    /// Created on first use of the experimental `magnifier` method.
+    magnifier: Option<Magnifier>,
     tray: Option<Tray>,
     /// Foreground-change hook, installed for the whole run.
     hook: HWINEVENTHOOK,
@@ -93,10 +96,22 @@ struct App {
 pub fn run() -> i32 {
     std::panic::set_hook(Box::new(|info| {
         log::error(&format!("panic: {info}"));
+        // The process aborts after this hook: never leave the screen dimmed.
+        magnifier::emergency_reset();
     }));
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--reset-screen") {
+        // Standalone recovery: drop any leftover Magnification color effect.
+        let ok = magnifier::force_reset();
+        log::info(&format!(
+            "--reset-screen: {}",
+            if ok { "ok" } else { "failed" }
+        ));
+        return if ok { 0 } else { 1 };
+    }
     if args.iter().any(|a| a == "--cleanup") {
+        magnifier::force_reset();
         autostart::remove();
         if let Err(e) = config::remove_all() {
             log::error(&format!("cleanup failed: {e}"));
@@ -131,6 +146,14 @@ pub fn run() -> i32 {
     if args.iter().any(|a| a == "--reset") || !cfg.restore_on_startup {
         cfg.level.set(0);
     }
+    for arg in &args {
+        if let Some(value) = arg.strip_prefix("--method=") {
+            match Method::parse(value) {
+                Some(method) => cfg.method = method,
+                None => log::warn(&format!("unknown --method value: {value}")),
+            }
+        }
+    }
     if args.iter().any(|a| a == "--autostart") {
         log::info("started from autostart");
     }
@@ -143,6 +166,7 @@ pub fn run() -> i32 {
         cfg,
         first_run: loaded.first_run,
         overlay: None,
+        magnifier: None,
         tray: None,
         hook: null_mut(),
         hook_show: null_mut(),
@@ -267,6 +291,10 @@ impl App {
                 WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) != 0;
         }
 
+        if self.cfg.method == Method::Magnifier && self.cfg.level.current() == 0 {
+            // A previous run may have died with the color effect still applied.
+            magnifier::force_reset();
+        }
         self.apply_level();
 
         let lang = self.lang();
@@ -337,20 +365,76 @@ impl App {
         }
     }
 
-    /// Pushes the current level to the overlay and tray, and schedules a save.
+    /// Pushes the current level to the screen and tray, and schedules a save.
     fn apply_level(&mut self) {
         let level = self.cfg.level.current();
-        if let Some(overlay) = &mut self.overlay {
-            overlay.apply(level);
-        }
+        self.apply_dimming(level);
         if let Some(tray) = &self.tray {
             tray.update(level);
         }
-        self.set_show_hook(level > 0);
         // SAFETY: restarts the one-shot save timer (debounce).
         unsafe {
             SetTimer(self.hwnd, TIMER_SAVE, SAVE_DELAY_MS, None);
         }
+    }
+
+    /// Dims with the configured method. If the experimental `magnifier`
+    /// method fails, the app switches back to the overlay, remembers that
+    /// choice (it is saved) and tells the user.
+    fn apply_dimming(&mut self, level: u8) {
+        if self.cfg.method == Method::Magnifier {
+            let result = self
+                .magnifier
+                .get_or_insert_with(Magnifier::new)
+                .apply(level);
+            match result {
+                Ok(()) => {
+                    // The overlay is not used in this mode.
+                    if let Some(overlay) = &mut self.overlay {
+                        overlay.apply(0);
+                    }
+                    self.set_show_hook(false);
+                    return;
+                }
+                Err(e) => {
+                    log::error(&format!("magnifier: {e}; falling back to the overlay"));
+                    self.cfg.method = Method::Overlay;
+                    self.magnifier = None; // Drop restores the screen
+                    let lang = self.lang();
+                    self.notify(tr(lang, S::MagnifierFailed), true);
+                }
+            }
+        }
+        // Overlay method (also the fallback path above).
+        if let Some(magnifier) = &mut self.magnifier {
+            magnifier.reset();
+        }
+        if let Some(overlay) = &mut self.overlay {
+            overlay.apply(level);
+        }
+        self.set_show_hook(level > 0);
+    }
+
+    /// Switches the dimming method at runtime. The old method is released
+    /// completely before the new one takes over.
+    fn switch_method(&mut self, new: Method) {
+        if self.cfg.method == new {
+            return;
+        }
+        log::info(&format!(
+            "dimming method: {} -> {}",
+            self.cfg.method.as_str(),
+            new.as_str()
+        ));
+        if let Some(magnifier) = &mut self.magnifier {
+            magnifier.reset();
+        }
+        if let Some(overlay) = &mut self.overlay {
+            overlay.apply(0);
+        }
+        self.set_show_hook(false);
+        self.cfg.method = new;
+        self.apply_level();
     }
 
     /// Installs or removes the hook that notices new topmost windows
@@ -388,9 +472,25 @@ impl App {
         }
     }
 
+    /// Foreground change or a new topmost window: only the overlay can be
+    /// covered by other windows, the color matrix cannot.
     fn reassert(&self) {
-        if let Some(overlay) = &self.overlay {
-            overlay.reassert();
+        if self.cfg.method == Method::Overlay {
+            if let Some(overlay) = &self.overlay {
+                overlay.reassert();
+            }
+        }
+    }
+
+    /// Resume, unlock, settings or display change: bring the dimming back
+    /// (raise the overlay / re-apply the color matrix).
+    fn refresh(&mut self) {
+        match self.cfg.method {
+            Method::Overlay => self.reassert(),
+            Method::Magnifier => {
+                let level = self.cfg.level.current();
+                self.apply_dimming(level);
+            }
         }
     }
 
@@ -412,11 +512,14 @@ impl App {
         }
         match id {
             TIMER_SAVE => self.save_now(),
-            TIMER_MONITORS => {
-                if let Some(overlay) = &mut self.overlay {
-                    overlay.sync();
+            TIMER_MONITORS => match self.cfg.method {
+                Method::Overlay => {
+                    if let Some(overlay) = &mut self.overlay {
+                        overlay.sync();
+                    }
                 }
-            }
+                Method::Magnifier => self.refresh(),
+            },
             _ => {}
         }
     }
@@ -427,6 +530,7 @@ impl App {
             current: self.cfg.level.current(),
             presets: self.cfg.level.presets().collect(),
             autostart: autostart::is_enabled(),
+            method: self.cfg.method,
         }
     }
 
@@ -434,6 +538,10 @@ impl App {
         if (tray::ID_LEVEL_BASE..=tray::ID_LEVEL_BASE + 100).contains(&cmd) {
             self.cfg.level.set((cmd - tray::ID_LEVEL_BASE) as u8);
             self.apply_level();
+        } else if cmd == tray::ID_METHOD_OVERLAY {
+            self.switch_method(Method::Overlay);
+        } else if cmd == tray::ID_METHOD_MAGNIFIER {
+            self.switch_method(Method::Magnifier);
         } else if cmd == tray::ID_AUTOSTART && !autostart::toggle() {
             log::warn("changing autostart failed");
         }
@@ -470,6 +578,10 @@ impl App {
         HOOK_TARGET.store(0, Ordering::Relaxed);
         if let Some(overlay) = &mut self.overlay {
             overlay.destroy();
+        }
+        // Restore the screen last-but-certainly: identity matrix, API released.
+        if let Some(magnifier) = &mut self.magnifier {
+            magnifier.reset();
         }
     }
 }
@@ -598,10 +710,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     // Clear first: events arriving during the pass queue a new one.
                     REASSERT_PENDING.store(false, Ordering::Release);
                 }
-                (*app).reassert();
                 if msg == WM_SETTINGCHANGE {
+                    (*app).refresh();
                     return DefWindowProcW(hwnd, msg, wparam, lparam);
                 }
+                (*app).reassert();
                 0
             }
             WM_APP_SHOW_SETTINGS => {
@@ -621,20 +734,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_POWERBROADCAST => {
                 if wparam == PBT_APMRESUMEAUTOMATIC {
-                    (*app).reassert();
+                    (*app).refresh();
                 }
                 1 // TRUE
             }
             WM_WTSSESSION_CHANGE => {
                 if wparam == WTS_SESSION_UNLOCK {
-                    (*app).reassert();
+                    (*app).refresh();
                 }
                 0
             }
             WM_QUERYENDSESSION => 1,
             WM_ENDSESSION => {
                 if wparam != 0 {
-                    (*app).save_now();
+                    // The session is ending: save and restore the screen now.
+                    (*app).shutdown();
                 }
                 0
             }

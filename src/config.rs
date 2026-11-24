@@ -37,6 +37,32 @@ impl Language {
     }
 }
 
+/// How the screen is dimmed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    /// Click-through black windows over every monitor (stable, default).
+    Overlay,
+    /// Experimental: color matrix of the Magnification API.
+    Magnifier,
+}
+
+impl Method {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "overlay" => Some(Self::Overlay),
+            "magnifier" => Some(Self::Magnifier),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Overlay => "overlay",
+            Self::Magnifier => "magnifier",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hotkeys {
     pub dim_more: Hotkey,
@@ -76,6 +102,7 @@ pub struct Config {
     pub level: Level,
     pub restore_on_startup: bool,
     pub language: Language,
+    pub method: Method,
     pub hotkeys: Hotkeys,
     /// The file was written by a newer version: never overwrite it.
     pub preserve_file: bool,
@@ -87,6 +114,7 @@ impl Default for Config {
             level: Level::default(),
             restore_on_startup: true,
             language: Language::Auto,
+            method: Method::Overlay,
             hotkeys: Hotkeys::default(),
             preserve_file: false,
         }
@@ -113,6 +141,7 @@ pub fn parse(text: &str) -> Config {
     let mut max: Option<u8> = None;
     let mut restore = None;
     let mut language = None;
+    let mut method = None;
     let mut hk_more = None;
     let mut hk_less = None;
     let mut hk_toggle = None;
@@ -135,6 +164,7 @@ pub fn parse(text: &str) -> Config {
             "max_level" => max = value.parse().ok(),
             "restore_on_startup" => restore = parse_bool(value),
             "language" => language = Language::parse(value),
+            "method" => method = Method::parse(value),
             "hotkey_dim_more" => hk_more = Hotkey::parse(value),
             "hotkey_dim_less" => hk_less = Hotkey::parse(value),
             "hotkey_toggle" => hk_toggle = Hotkey::parse(value),
@@ -152,6 +182,7 @@ pub fn parse(text: &str) -> Config {
         ),
         restore_on_startup: restore.unwrap_or(defaults.restore_on_startup),
         language: language.unwrap_or(defaults.language),
+        method: method.unwrap_or(defaults.method),
         hotkeys: Hotkeys {
             dim_more: hk_more.unwrap_or(defaults.hotkeys.dim_more),
             dim_less: hk_less.unwrap_or(defaults.hotkeys.dim_less),
@@ -172,6 +203,7 @@ pub fn serialize(cfg: &Config) -> String {
          max_level={}\n\
          restore_on_startup={}\n\
          language={}\n\
+         method={}\n\
          hotkey_dim_more={}\n\
          hotkey_dim_less={}\n\
          hotkey_toggle={}\n",
@@ -181,6 +213,7 @@ pub fn serialize(cfg: &Config) -> String {
         cfg.level.max(),
         u8::from(cfg.restore_on_startup),
         cfg.language.as_str(),
+        cfg.method.as_str(),
         cfg.hotkeys.dim_more,
         cfg.hotkeys.dim_less,
         cfg.hotkeys.toggle,
@@ -293,10 +326,22 @@ mod tests {
     }
 
     #[test]
+    fn method_parsing() {
+        assert_eq!(Method::parse("overlay"), Some(Method::Overlay));
+        assert_eq!(Method::parse("Magnifier"), Some(Method::Magnifier));
+        assert_eq!(Method::parse("gamma"), None);
+        assert_eq!(parse("").method, Method::Overlay);
+        assert_eq!(parse("method=magnifier\n").method, Method::Magnifier);
+        // an unknown value must fall back to the stable method
+        assert_eq!(parse("method=nonsense\n").method, Method::Overlay);
+    }
+
+    #[test]
     fn round_trip() {
         let cfg = Config {
             level: Level::new(60, 60, 15, 95),
             language: Language::En,
+            method: Method::Magnifier,
             restore_on_startup: false,
             ..Config::default()
         };

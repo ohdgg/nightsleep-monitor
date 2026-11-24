@@ -29,6 +29,10 @@ pub enum S {
     MenuHeader,
     MenuOff,
     MenuAutostart,
+    MenuMethodHeader,
+    MethodOverlay,
+    MethodMagnifier,
+    MagnifierFailed,
     MenuAbout,
     MenuExit,
     AboutDescription,
@@ -43,6 +47,18 @@ pub fn tr(lang: Lang, s: S) -> &'static str {
         (Lang::En, S::MenuOff) => "0%  (off)",
         (Lang::Ru, S::MenuAutostart) => "Запускать вместе с Windows",
         (Lang::En, S::MenuAutostart) => "Start with Windows",
+        (Lang::Ru, S::MenuMethodHeader) => "Метод затемнения",
+        (Lang::En, S::MenuMethodHeader) => "Dimming method",
+        (Lang::Ru, S::MethodOverlay) => "Оверлей (стабильный)",
+        (Lang::En, S::MethodOverlay) => "Overlay (stable)",
+        (Lang::Ru, S::MethodMagnifier) => "Magnifier (эксперимент)",
+        (Lang::En, S::MethodMagnifier) => "Magnifier (experimental)",
+        (Lang::Ru, S::MagnifierFailed) => {
+            "Метод Magnifier не сработал. Включён оверлей. Подробности в log.txt."
+        }
+        (Lang::En, S::MagnifierFailed) => {
+            "The Magnifier method failed. Switched back to the overlay. See log.txt."
+        }
         (Lang::Ru, S::MenuAbout) => "О программе",
         (Lang::En, S::MenuAbout) => "About",
         (Lang::Ru, S::MenuExit) => "Выход",

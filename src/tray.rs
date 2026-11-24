@@ -16,6 +16,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MIIM_STRING, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
 };
 
+use crate::config::Method;
 use crate::i18n::{tr, Lang, S};
 use crate::win::{copy_wide, wide};
 
@@ -31,6 +32,8 @@ pub const ID_LEVEL_BASE: u32 = 1000; // 1000 + percent
 pub const ID_AUTOSTART: u32 = 2000;
 pub const ID_ABOUT: u32 = 2001;
 pub const ID_EXIT: u32 = 2002;
+pub const ID_METHOD_OVERLAY: u32 = 2010;
+pub const ID_METHOD_MAGNIFIER: u32 = 2011;
 
 pub struct Tray {
     hwnd: HWND,
@@ -132,6 +135,7 @@ pub struct MenuSnapshot {
     pub current: u8,
     pub presets: Vec<u8>,
     pub autostart: bool,
+    pub method: Method,
 }
 
 fn insert_item(menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU, pos: u32, item: Item<'_>) {
@@ -214,6 +218,19 @@ pub fn show_menu(hwnd: HWND, snap: &MenuSnapshot) -> u32 {
             item.checked = level == snap.current;
             push(item);
         }
+
+        push(Item::separator());
+        let mut method_header = Item::text(0, tr(snap.lang, S::MenuMethodHeader));
+        method_header.disabled = true;
+        push(method_header);
+        let mut overlay = Item::text(ID_METHOD_OVERLAY, tr(snap.lang, S::MethodOverlay));
+        overlay.radio = true;
+        overlay.checked = snap.method == Method::Overlay;
+        push(overlay);
+        let mut magnifier = Item::text(ID_METHOD_MAGNIFIER, tr(snap.lang, S::MethodMagnifier));
+        magnifier.radio = true;
+        magnifier.checked = snap.method == Method::Magnifier;
+        push(magnifier);
 
         push(Item::separator());
         let mut autostart = Item::text(ID_AUTOSTART, tr(snap.lang, S::MenuAutostart));
