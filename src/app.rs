@@ -9,7 +9,7 @@
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM,
@@ -26,12 +26,13 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW, GetMessageW,
-    GetWindowLongPtrW, KillTimer, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassExW,
-    RegisterWindowMessageW, SetTimer, SetWindowLongPtrW, TranslateMessage, CREATESTRUCTW,
-    EVENT_SYSTEM_FOREGROUND, GWLP_USERDATA, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MSG,
-    WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONUP, WM_NCCREATE, WM_POWERBROADCAST, WM_QUERYENDSESSION,
-    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_POPUP,
+    GetWindowLongPtrW, GetWindowLongW, KillTimer, MessageBoxW, PostMessageW, PostQuitMessage,
+    RegisterClassExW, RegisterWindowMessageW, SetTimer, SetWindowLongPtrW, TranslateMessage,
+    CREATESTRUCTW, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, GWLP_USERDATA, GWL_EXSTYLE,
+    GWL_STYLE, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MSG, OBJID_WINDOW,
+    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONUP, WM_NCCREATE, WM_POWERBROADCAST,
+    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_POPUP,
 };
 
 use crate::autostart;
@@ -39,7 +40,7 @@ use crate::config::{self, Config};
 use crate::hotkey::{self, Hotkey};
 use crate::i18n::{self, tr, Lang, S};
 use crate::log;
-use crate::overlay::Overlay;
+use crate::overlay::{should_reassert, Overlay};
 use crate::tray::{self, MenuSnapshot, Tray};
 use crate::win::{loword, wide};
 
@@ -70,6 +71,8 @@ const APP_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
 /// Window handle for the WinEvent callback, which has no user-data parameter.
 static HOOK_TARGET: AtomicIsize = AtomicIsize::new(0);
+/// True while a reassert message is queued: bursts of events collapse into one.
+static REASSERT_PENDING: AtomicBool = AtomicBool::new(false);
 
 struct App {
     hwnd: HWND,
@@ -77,7 +80,11 @@ struct App {
     first_run: bool,
     overlay: Option<Overlay>,
     tray: Option<Tray>,
+    /// Foreground-change hook, installed for the whole run.
     hook: HWINEVENTHOOK,
+    /// Window-shown hook, installed only while dimming is active so that the
+    /// idle app (0%) receives no system-wide events at all.
+    hook_show: HWINEVENTHOOK,
     taskbar_created_msg: u32,
     session_registered: bool,
     shut_down: bool,
@@ -138,6 +145,7 @@ pub fn run() -> i32 {
         overlay: None,
         tray: None,
         hook: null_mut(),
+        hook_show: null_mut(),
         taskbar_created_msg: 0,
         session_registered: false,
         shut_down: false,
@@ -338,9 +346,39 @@ impl App {
         if let Some(tray) = &self.tray {
             tray.update(level);
         }
+        self.set_show_hook(level > 0);
         // SAFETY: restarts the one-shot save timer (debounce).
         unsafe {
             SetTimer(self.hwnd, TIMER_SAVE, SAVE_DELAY_MS, None);
+        }
+    }
+
+    /// Installs or removes the hook that notices new topmost windows
+    /// (taskbar thumbnails, tooltips, flyouts) so the overlay can go back on top.
+    fn set_show_hook(&mut self, on: bool) {
+        // SAFETY: the callback only filters and posts a message to our window;
+        // the handle is owned by `self` and released exactly once.
+        unsafe {
+            if on && self.hook_show.is_null() {
+                self.hook_show = SetWinEventHook(
+                    EVENT_OBJECT_SHOW,
+                    EVENT_OBJECT_SHOW,
+                    null_mut(),
+                    Some(show_event_proc),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                );
+                if self.hook_show.is_null() {
+                    log::warn(&format!(
+                        "SetWinEventHook(EVENT_OBJECT_SHOW) failed ({})",
+                        GetLastError()
+                    ));
+                }
+            } else if !on && !self.hook_show.is_null() {
+                UnhookWinEvent(self.hook_show);
+                self.hook_show = null_mut();
+            }
         }
     }
 
@@ -420,6 +458,10 @@ impl App {
                 UnhookWinEvent(self.hook);
                 self.hook = null_mut();
             }
+            if !self.hook_show.is_null() {
+                UnhookWinEvent(self.hook_show);
+                self.hook_show = null_mut();
+            }
             if self.session_registered {
                 WTSUnRegisterSessionNotification(self.hwnd);
                 self.session_registered = false;
@@ -476,12 +518,47 @@ unsafe extern "system" fn win_event_proc(
     _thread: u32,
     _time: u32,
 ) {
+    request_reassert();
+}
+
+/// A window was shown somewhere in the system (another process: our own
+/// events are skipped by `WINEVENT_SKIPOWNPROCESS`). Only top-level topmost
+/// windows can cover the overlay, so everything else is ignored cheaply.
+unsafe extern "system" fn show_event_proc(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if hwnd.is_null() || id_object != OBJID_WINDOW || id_child != 0 {
+        return;
+    }
+    // SAFETY: plain queries on a window handle; a stale handle just fails.
+    let (style, ex_style) = unsafe {
+        (
+            GetWindowLongW(hwnd, GWL_STYLE) as u32,
+            GetWindowLongW(hwnd, GWL_EXSTYLE) as u32,
+        )
+    };
+    if should_reassert(style, ex_style) {
+        request_reassert();
+    }
+}
+
+/// Asks the message loop to raise the overlay. At most one request is queued
+/// at a time, so a burst of events costs a single `SetWindowPos` pass.
+fn request_reassert() {
     let target = HOOK_TARGET.load(Ordering::Relaxed);
-    if target != 0 {
-        // SAFETY: posting to our own window; failure is harmless.
-        unsafe {
-            PostMessageW(target as HWND, WM_APP_REASSERT, 0, 0);
-        }
+    if target == 0 || REASSERT_PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    // SAFETY: posting to our own window.
+    let posted = unsafe { PostMessageW(target as HWND, WM_APP_REASSERT, 0, 0) };
+    if posted == 0 {
+        REASSERT_PENDING.store(false, Ordering::Release);
     }
 }
 
@@ -517,6 +594,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 0
             }
             WM_APP_REASSERT | WM_SETTINGCHANGE => {
+                if msg == WM_APP_REASSERT {
+                    // Clear first: events arriving during the pass queue a new one.
+                    REASSERT_PENDING.store(false, Ordering::Release);
+                }
                 (*app).reassert();
                 if msg == WM_SETTINGCHANGE {
                     return DefWindowProcW(hwnd, msg, wparam, lparam);

@@ -4,14 +4,15 @@ use std::mem::size_of;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, RECT};
+use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_EXCLUDED_FROM_PEEK};
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetStockObject, BLACK_BRUSH, HBRUSH, HDC, HMONITOR,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, SetLayeredWindowAttributes,
     SetWindowPos, ShowWindow, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW, SW_HIDE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    SWP_SHOWWINDOW, SW_HIDE, WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::level;
@@ -187,9 +188,38 @@ impl Overlay {
             log::error(&format!("overlay: CreateWindowExW failed ({code})"));
             None
         } else {
+            exclude_from_peek(hwnd);
             Some(hwnd)
         }
     }
+}
+
+/// Aero Peek (hovering a taskbar thumbnail or the "Show desktop" corner)
+/// hides every window except the previewed one, which would make the whole
+/// screen flash at full brightness. This attribute keeps the overlay visible.
+fn exclude_from_peek(hwnd: HWND) {
+    let enable: i32 = 1; // BOOL TRUE
+                         // SAFETY: `enable` outlives the call and the size matches a BOOL.
+    let hr = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_EXCLUDED_FROM_PEEK as u32,
+            &enable as *const i32 as *const std::ffi::c_void,
+            size_of::<i32>() as u32,
+        )
+    };
+    if hr < 0 {
+        log::warn(&format!(
+            "overlay: DWMWA_EXCLUDED_FROM_PEEK failed (HRESULT {hr:#010X})"
+        ));
+    }
+}
+
+/// True if a window that has just been shown can end up above the overlay:
+/// a top-level (not child) window that is topmost, such as a taskbar
+/// thumbnail, tooltip or flyout. Used to filter system-wide show events.
+pub fn should_reassert(style: u32, ex_style: u32) -> bool {
+    style & WS_CHILD == 0 && ex_style & WS_EX_TOPMOST != 0
 }
 
 impl Drop for Overlay {
@@ -224,4 +254,19 @@ fn monitor_rects() -> Vec<RECT> {
         );
     }
     rects
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_toplevel_topmost_windows_trigger() {
+        assert!(should_reassert(WS_POPUP, WS_EX_TOPMOST));
+        assert!(should_reassert(0, WS_EX_TOPMOST | WS_EX_TOOLWINDOW));
+        assert!(!should_reassert(WS_POPUP, WS_EX_TOOLWINDOW));
+        assert!(!should_reassert(0, 0));
+        // a topmost-styled child is not a top-level window
+        assert!(!should_reassert(WS_CHILD, WS_EX_TOPMOST));
+    }
 }
