@@ -12,9 +12,9 @@ use windows_sys::Win32::System::Registry::{
 use crate::win::wide;
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const VALUE_NAME: &str = "NightSleep";
+const VALUE_NAME: &str = "NightSleep-Monitor";
 
-/// `"C:\path\nightsleep.exe" --autostart`
+/// `"C:\path\nightsleep-monitor.exe" --autostart`
 fn expected_command() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     Some(format!("\"{}\" --autostart", exe.display()))
