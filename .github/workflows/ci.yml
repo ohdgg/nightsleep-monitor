@@ -14,7 +14,7 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
@@ -38,7 +38,7 @@ jobs:
           Write-Host "nightsleep.exe: $size bytes (limit $env:MAX_EXE_BYTES)"
           if ($size -gt [int]$env:MAX_EXE_BYTES) { throw "exe is too large" }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nightsleep-windows-x64
           path: target/release/nightsleep.exe

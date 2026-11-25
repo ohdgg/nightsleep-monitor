@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Tests
+        run: cargo test
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $dir = "nightsleep-$tag-windows-x64"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item target/release/nightsleep.exe $dir
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE $dir
+          Compress-Archive -Path "$dir/*" -DestinationPath "$dir.zip"
+          Get-FileHash "$dir.zip" -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $dir.zip" } | Set-Content "$dir.zip.sha256"
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag "nightsleep-$tag-windows-x64.zip" "nightsleep-$tag-windows-x64.zip.sha256" `
+            --title "NightSleep $tag" --generate-notes
