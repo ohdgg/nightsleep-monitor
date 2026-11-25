@@ -150,7 +150,7 @@ pub fn run() -> i32 {
     let app_ptr = Box::into_raw(app);
 
     let class = wide(MSG_CLASS);
-    let title = wide("NightSleep");
+    let title = wide("NightSleep-Monitor");
     // SAFETY: the class/title buffers outlive the calls; `app_ptr` stays valid
     // until reclaimed below, after the message loop has ended.
     let exit_code = unsafe {
@@ -272,7 +272,7 @@ impl App {
 
     fn notify(&self, text: &str, warning: bool) {
         if let Some(tray) = &self.tray {
-            tray.notify("NightSleep", text, warning);
+            tray.notify("NightSleep-Monitor", text, warning);
         }
     }
 
