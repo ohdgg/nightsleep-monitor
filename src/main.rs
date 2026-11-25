@@ -28,6 +28,6 @@ fn main() {
 
 #[cfg(not(any(windows, nightsleep_typecheck)))]
 fn main() {
-    eprintln!("NightSleep supports Windows only.");
+    eprintln!("NightSleep-Monitor supports Windows only.");
     std::process::exit(1);
 }
