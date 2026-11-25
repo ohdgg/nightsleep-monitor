@@ -1,4 +1,4 @@
-//! Minimal file logger: `%APPDATA%\NightSleep\log.txt`, one rotation to
+//! Minimal file logger: `%APPDATA%\NightSleep-Monitor\log.txt`, one rotation to
 //! `log.old.txt` at 256 KiB. The file is opened per write, so no handle is
 //! kept and nothing here can ever bring the app down.
 
