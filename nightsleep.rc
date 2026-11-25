@@ -17,11 +17,11 @@ FILETYPE 0x1
     {
         BLOCK "040904B0"
         {
-            VALUE "FileDescription", "NightSleep - deep screen dimming"
+            VALUE "FileDescription", "NightSleep-Monitor - deep screen dimming"
             VALUE "FileVersion", "1.0.0"
-            VALUE "InternalName", "nightsleep"
-            VALUE "OriginalFilename", "nightsleep.exe"
-            VALUE "ProductName", "NightSleep"
+            VALUE "InternalName", "nightsleep-monitor"
+            VALUE "OriginalFilename", "nightsleep-monitor.exe"
+            VALUE "ProductName", "NightSleep-Monitor"
             VALUE "ProductVersion", "1.0.0"
             VALUE "LegalCopyright", "MIT OR Apache-2.0"
         }
