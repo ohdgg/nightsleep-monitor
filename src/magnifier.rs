@@ -84,7 +84,7 @@ impl Drop for Magnifier {
 
 /// Standalone recovery (`--reset-screen`): initialise, apply the identity
 /// matrix, release. Returns whether the matrix could be set. Best effort when
-/// another NightSleep process holds the effect.
+/// another NightSleep-Monitor process holds the effect.
 pub fn force_reset() -> bool {
     // SAFETY: plain FFI calls; uninitialise only if we initialised.
     unsafe {
