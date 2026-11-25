@@ -34,11 +34,11 @@ jobs:
       - name: Check exe size
         shell: pwsh
         run: |
-          $size = (Get-Item target/release/nightsleep.exe).Length
-          Write-Host "nightsleep.exe: $size bytes (limit $env:MAX_EXE_BYTES)"
+          $size = (Get-Item target/release/nightsleep-monitor.exe).Length
+          Write-Host "nightsleep-monitor.exe: $size bytes (limit $env:MAX_EXE_BYTES)"
           if ($size -gt [int]$env:MAX_EXE_BYTES) { throw "exe is too large" }
 
       - uses: actions/upload-artifact@v7
         with:
           name: nightsleep-windows-x64
-          path: target/release/nightsleep.exe
+          path: target/release/nightsleep-monitor.exe
