@@ -78,7 +78,7 @@ impl Tray {
     }
 
     fn tip(level: u8) -> String {
-        format!("NightSleep — {level}%")
+        format!("NightSleep-Monitor — {level}%")
     }
 
     /// Adds (or re-adds, after an Explorer restart) the icon.
