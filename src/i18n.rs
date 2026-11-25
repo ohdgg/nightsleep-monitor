@@ -39,7 +39,7 @@ pub enum S {
 
 pub fn tr(lang: Lang, s: S) -> &'static str {
     match (lang, s) {
-        (_, S::MenuHeader) => "NightSleep",
+        (_, S::MenuHeader) => "NightSleep-Monitor",
         (Lang::Ru, S::MenuOff) => "0%  (выкл)",
         (Lang::En, S::MenuOff) => "0%  (off)",
         (Lang::Ru, S::MenuAutostart) => "Запускать вместе с Windows",
@@ -56,8 +56,8 @@ pub fn tr(lang: Lang, s: S) -> &'static str {
         (Lang::En, S::MenuExit) => "Exit",
         (Lang::Ru, S::AboutDescription) => "Утилита для глубокого затемнения экрана.",
         (Lang::En, S::AboutDescription) => "Utility for deep screen dimming.",
-        (Lang::Ru, S::AlreadyRunning) => "NightSleep уже запущен.",
-        (Lang::En, S::AlreadyRunning) => "NightSleep is already running.",
+        (Lang::Ru, S::AlreadyRunning) => "NightSleep-Monitor уже запущен.",
+        (Lang::En, S::AlreadyRunning) => "NightSleep-Monitor is already running.",
         (Lang::Ru, S::HotkeysFailed) => {
             "Не удалось зарегистрировать горячие клавиши (заняты другим приложением): "
         }
