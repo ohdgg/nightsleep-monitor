@@ -164,7 +164,7 @@ pub fn parse(text: &str) -> Config {
 
 pub fn serialize(cfg: &Config) -> String {
     format!(
-        "; NightSleep configuration\n\
+        "; NightSleep-Monitor configuration\n\
          version={FILE_VERSION}\n\
          level={}\n\
          last_nonzero_level={}\n\
@@ -189,9 +189,9 @@ pub fn serialize(cfg: &Config) -> String {
 
 // ---------------------------------------------------------------- file I/O
 
-/// `%APPDATA%\NightSleep`
+/// `%APPDATA%\NightSleep-Monitor`
 pub fn app_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("NightSleep"))
+    std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("NightSleep-Monitor"))
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -248,7 +248,7 @@ pub fn save(cfg: &Config) -> io::Result<()> {
     fs::rename(&tmp, &path)
 }
 
-/// `--cleanup`: delete `%APPDATA%\NightSleep` entirely.
+/// `--cleanup`: delete `%APPDATA%\NightSleep-Monitor` entirely.
 pub fn remove_all() -> io::Result<()> {
     match app_dir() {
         Some(dir) => match fs::remove_dir_all(dir) {
